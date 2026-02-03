@@ -13,10 +13,20 @@ const COLORS = {
 const SHEPHERD_X = 150
 const GROUND_Y_OFFSET = 20
 const SLING_RADIUS = 45
-const BASE_ANGULAR_SPEED = 2.5
-const SPEED_INCREASE_PER_ROTATION = 0.25
-const LAUNCH_VELOCITY_MULTIPLIER = 180
-const REST_DELAY_MS = 500
+const STONE_RADIUS = 8
+
+// Sling mechanics
+const BASE_ANGULAR_SPEED = 8 // radians per second
+const SPEED_INCREASE_PER_ROTATION = 0.15
+const MAX_SPEED_MULTIPLIER = 3
+
+// Physics constants
+const GRAVITY = 800 // pixels per second squared
+const LAUNCH_SPEED = 300 // base launch speed in pixels/second
+const BOUNCE_DAMPING = 0.4 // velocity retained after bounce
+const FRICTION = 0.98 // horizontal velocity multiplier per frame when rolling
+const REST_THRESHOLD = 10 // velocity below this = at rest
+const PIXELS_PER_METER = 50 // scale for distance display
 
 type GameState = 'idle' | 'swinging' | 'flying' | 'resting'
 
@@ -25,15 +35,18 @@ export class GameScene extends Phaser.Scene {
   private shepherdGraphics!: Phaser.GameObjects.Graphics
   private slingGraphics!: Phaser.GameObjects.Graphics
   private stoneGraphics!: Phaser.GameObjects.Graphics
+  private groundGraphics!: Phaser.GameObjects.Graphics
   private hintText!: Phaser.GameObjects.Text
+  private distanceText!: Phaser.GameObjects.Text
 
   // Positions
   private handPosition!: Phaser.Math.Vector2
   private stonePosition!: Phaser.Math.Vector2
   private groundY!: number
 
-  // Physics
-  private stoneBody: MatterJS.BodyType | null = null
+  // Velocity (only used during flight)
+  private velocityX: number = 0
+  private velocityY: number = 0
 
   // State
   private gameState: GameState = 'idle'
@@ -41,7 +54,6 @@ export class GameScene extends Phaser.Scene {
   private angularSpeed: number = BASE_ANGULAR_SPEED
   private rotationCount: number = 0
   private lastAngleForCount: number = 0
-  private restingTime: number = 0
   private hasThrown: boolean = false
 
   // Input
@@ -63,21 +75,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupWorld(): void {
-    this.cameras.main.setBackgroundColor(COLORS.sky)
     this.cameras.main.setBounds(-100, 0, 20000, this.scale.height)
 
-    const groundWidth = 20000
-    this.matter.add.rectangle(
-      groundWidth / 2,
-      this.groundY + 10,
-      groundWidth,
-      20,
-      { isStatic: true, friction: 0.8, restitution: 0.4, label: 'ground' }
-    )
-
-    const groundGraphics = this.add.graphics()
-    groundGraphics.fillStyle(COLORS.ground, 1)
-    groundGraphics.fillRect(-100, this.groundY, groundWidth + 100, 40)
+    // Draw ground
+    this.groundGraphics = this.add.graphics()
+    this.groundGraphics.fillStyle(COLORS.ground, 1)
+    this.groundGraphics.fillRect(-100, this.groundY, 20100, 40)
   }
 
   private setupShepherd(): void {
@@ -105,6 +108,17 @@ export class GameScene extends Phaser.Scene {
     )
     this.hintText.setOrigin(0.5)
     this.hintText.setScrollFactor(0)
+
+    // Distance display (hidden until stone comes to rest)
+    this.distanceText = this.add.text(
+      this.scale.width / 2,
+      50,
+      '',
+      { fontFamily: 'monospace', fontSize: '24px', color: '#2d2d2d', align: 'center' }
+    )
+    this.distanceText.setOrigin(0.5)
+    this.distanceText.setScrollFactor(0)
+    this.distanceText.setAlpha(0)
   }
 
   private setupInput(): void {
@@ -113,7 +127,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    const dt = delta / 1000
+    const dt = delta / 1000 // convert to seconds
+
+    // R key resets from any state except idle
+    if (this.rKey.isDown && this.gameState !== 'idle') {
+      this.resetGame()
+      return
+    }
 
     switch (this.gameState) {
       case 'idle':
@@ -123,11 +143,10 @@ export class GameScene extends Phaser.Scene {
         this.updateSwinging(dt)
         break
       case 'flying':
-        this.updateFlying()
+        this.updateFlying(dt)
         break
       case 'resting':
-        this.restingTime += delta
-        if (this.restingTime > REST_DELAY_MS && this.rKey.isDown) this.resetGame()
+        // Just wait for R key (handled above)
         break
     }
   }
@@ -141,77 +160,116 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateSwinging(dt: number): void {
+    // Rotate stone around hand
     this.slingAngle += this.angularSpeed * dt
 
+    // Count rotations and increase speed
     if (this.slingAngle - this.lastAngleForCount >= Math.PI * 2) {
       this.rotationCount++
       this.lastAngleForCount = this.slingAngle
       this.angularSpeed = Math.min(
         BASE_ANGULAR_SPEED * (1 + SPEED_INCREASE_PER_ROTATION * this.rotationCount),
-        BASE_ANGULAR_SPEED * 5
+        BASE_ANGULAR_SPEED * MAX_SPEED_MULTIPLIER
       )
     }
 
+    // Update stone position on the circle
     this.stonePosition.x = this.handPosition.x + Math.cos(this.slingAngle) * SLING_RADIUS
     this.stonePosition.y = this.handPosition.y - Math.sin(this.slingAngle) * SLING_RADIUS
     this.drawSlingAndStone()
 
-    if (!this.spaceKey.isDown) this.launchStone()
+    // Release on space up
+    if (!this.spaceKey.isDown) {
+      this.launchStone()
+    }
   }
 
   private launchStone(): void {
+    // Calculate tangent direction (perpendicular to radius, in direction of rotation)
+    // For counter-clockwise rotation: tangent = (-sin, -cos) in screen coords
     const tangentX = -Math.sin(this.slingAngle)
     const tangentY = -Math.cos(this.slingAngle)
-    const speed = this.angularSpeed * LAUNCH_VELOCITY_MULTIPLIER / Math.PI
 
-    this.stoneBody = this.matter.add.circle(
-      this.stonePosition.x,
-      this.stonePosition.y,
-      8,
-      { restitution: 0.4, friction: 0.3, frictionAir: 0.001, label: 'stone' }
-    )
+    // Launch speed scales with angular speed
+    const speedMultiplier = this.angularSpeed / BASE_ANGULAR_SPEED
+    const launchSpeed = LAUNCH_SPEED * speedMultiplier
 
-    this.matter.body.setVelocity(this.stoneBody, {
-      x: tangentX * speed,
-      y: tangentY * speed,
-    })
+    this.velocityX = tangentX * launchSpeed
+    this.velocityY = tangentY * launchSpeed
 
+    // Hide sling cord
     this.slingGraphics.clear()
     this.gameState = 'flying'
 
+    // Fade hint on first throw
     if (!this.hasThrown) {
       this.hasThrown = true
       this.tweens.add({ targets: this.hintText, alpha: 0, duration: 1000, ease: 'Power2' })
     }
   }
 
-  private updateFlying(): void {
-    if (!this.stoneBody) return
+  private updateFlying(dt: number): void {
+    // Apply gravity
+    this.velocityY += GRAVITY * dt
 
-    this.stonePosition.x = this.stoneBody.position.x
-    this.stonePosition.y = this.stoneBody.position.y
-    this.drawStoneOnly()
+    // Update position
+    this.stonePosition.x += this.velocityX * dt
+    this.stonePosition.y += this.velocityY * dt
 
-    this.cameras.main.scrollX = this.stonePosition.x - 200
+    // Ground collision
+    const groundContact = this.groundY - STONE_RADIUS
+    if (this.stonePosition.y >= groundContact) {
+      this.stonePosition.y = groundContact
 
-    const { x: vx, y: vy } = this.stoneBody.velocity
-    const speed = Math.sqrt(vx * vx + vy * vy)
+      // Bounce
+      if (Math.abs(this.velocityY) > REST_THRESHOLD) {
+        this.velocityY = -this.velocityY * BOUNCE_DAMPING
+        this.velocityX *= 0.9 // Lose some horizontal speed on bounce
+      } else {
+        // Rolling on ground
+        this.velocityY = 0
+        this.velocityX *= FRICTION
+      }
 
-    if (speed < 0.1 && this.stonePosition.y >= this.groundY - 10) {
-      this.gameState = 'resting'
-      this.restingTime = 0
+      // Check if at rest
+      if (Math.abs(this.velocityX) < REST_THRESHOLD && Math.abs(this.velocityY) < REST_THRESHOLD) {
+        this.velocityX = 0
+        this.velocityY = 0
+        this.gameState = 'resting'
+        this.showDistance()
+      }
     }
+
+    // Update camera to follow stone
+    this.cameras.main.scrollX = Math.max(0, this.stonePosition.x - 200)
+
+    // Redraw stone
+    this.drawStoneOnly()
+  }
+
+  private showDistance(): void {
+    const distancePixels = this.stonePosition.x - SHEPHERD_X
+    const distanceMeters = distancePixels / PIXELS_PER_METER
+    this.distanceText.setText(`${distanceMeters.toFixed(1)}m`)
+    this.distanceText.setAlpha(1)
   }
 
   private resetGame(): void {
-    if (this.stoneBody) {
-      this.matter.world.remove(this.stoneBody)
-      this.stoneBody = null
-    }
-
+    // Reset stone position
     this.stonePosition.x = this.handPosition.x + SLING_RADIUS
     this.stonePosition.y = this.handPosition.y
+
+    // Reset velocity
+    this.velocityX = 0
+    this.velocityY = 0
+
+    // Reset camera
     this.cameras.main.scrollX = 0
+
+    // Hide distance
+    this.distanceText.setAlpha(0)
+
+    // Redraw
     this.drawSlingAndStone()
     this.gameState = 'idle'
   }
@@ -260,6 +318,6 @@ export class GameScene extends Phaser.Scene {
   private drawStoneOnly(): void {
     this.stoneGraphics.clear()
     this.stoneGraphics.fillStyle(COLORS.stone, 1)
-    this.stoneGraphics.fillCircle(this.stonePosition.x, this.stonePosition.y, 8)
+    this.stoneGraphics.fillCircle(this.stonePosition.x, this.stonePosition.y, STONE_RADIUS)
   }
 }

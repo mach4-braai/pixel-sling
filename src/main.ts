@@ -6,13 +6,7 @@ const config: Phaser.Types.Core.GameConfig = {
   width: 800,
   height: 450,
   parent: 'game-container',
-  physics: {
-    default: 'matter',
-    matter: {
-      gravity: { x: 0, y: 1 },
-      debug: false,
-    },
-  },
+  backgroundColor: '#8899aa',
   scene: [GameScene],
 }
 
