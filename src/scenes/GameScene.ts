@@ -41,6 +41,10 @@ export class GameScene extends Phaser.Scene {
   private spaceKey!: Phaser.Input.Keyboard.Key
   private rKey!: Phaser.Input.Keyboard.Key
 
+  // Hint text
+  private hintText!: Phaser.GameObjects.Text
+  private hasThrown: boolean = false
+
   constructor() {
     super({ key: 'GameScene' })
   }
@@ -89,6 +93,21 @@ export class GameScene extends Phaser.Scene {
     this.stoneGraphics = this.add.graphics()
 
     this.drawSlingAndStone()
+
+    // Hint text
+    this.hintText = this.add.text(
+      this.scale.width / 2,
+      this.scale.height - 60,
+      'Hold SPACE to swing, release to throw\nPress R to reset',
+      {
+        fontFamily: 'monospace',
+        fontSize: '14px',
+        color: '#2d2d2d',
+        align: 'center',
+      }
+    )
+    this.hintText.setOrigin(0.5)
+    this.hintText.setScrollFactor(0) // Fixed to camera
 
     // Input
     this.spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
@@ -187,6 +206,16 @@ export class GameScene extends Phaser.Scene {
 
     // Hide sling cord
     this.slingGraphics.clear()
+
+    if (!this.hasThrown) {
+      this.hasThrown = true
+      this.tweens.add({
+        targets: this.hintText,
+        alpha: 0,
+        duration: 1000,
+        ease: 'Power2',
+      })
+    }
 
     this.gameState = 'flying'
   }
