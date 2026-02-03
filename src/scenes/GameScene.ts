@@ -8,7 +8,18 @@ const COLORS = {
   stone: 0x666666,
   sling: 0x3d3d3d,
   trajectory: 0x666666,
+  sweetSpot: 0x4a7c4e,
+  powerBar: 0x4a7c4e,
+  powerBarBg: 0x3d3d3d,
 }
+
+// Release zone (optimal release angles for forward throw)
+const SWEET_SPOT_START = Math.PI * 0.25  // 45 degrees into rotation
+const SWEET_SPOT_END = Math.PI * 0.75    // 135 degrees into rotation
+
+// Slow motion settings
+const SLOW_MO_DURATION = 800  // milliseconds
+const SLOW_MO_SCALE = 0.3     // time scale during slow-mo
 
 const STORAGE_KEY = 'pixel-sling-highscore'
 
@@ -40,6 +51,9 @@ export class GameScene extends Phaser.Scene {
   private stoneGraphics!: Phaser.GameObjects.Graphics
   private groundGraphics!: Phaser.GameObjects.Graphics
   private trajectoryGraphics!: Phaser.GameObjects.Graphics
+  private releaseZoneGraphics!: Phaser.GameObjects.Graphics
+  private powerMeterBg!: Phaser.GameObjects.Graphics
+  private powerMeterFill!: Phaser.GameObjects.Graphics
   private hintText!: Phaser.GameObjects.Text
   private distanceText!: Phaser.GameObjects.Text
   private highScoreText!: Phaser.GameObjects.Text
@@ -47,6 +61,9 @@ export class GameScene extends Phaser.Scene {
 
   // High score
   private highScore: number = 0
+
+  // Slow motion
+  private isSlowMo: boolean = false
 
   // Previous throw trajectory
   private previousTrajectory: { x: number; y: number }[] = []
@@ -70,7 +87,6 @@ export class GameScene extends Phaser.Scene {
 
   // Input
   private spaceKey!: Phaser.Input.Keyboard.Key
-  private rKey!: Phaser.Input.Keyboard.Key
 
   constructor() {
     super({ key: 'GameScene' })
@@ -120,6 +136,7 @@ export class GameScene extends Phaser.Scene {
       this.handPosition.x,
       this.handPosition.y + SLING_RADIUS
     )
+    this.releaseZoneGraphics = this.add.graphics()
     this.slingGraphics = this.add.graphics()
     this.stoneGraphics = this.add.graphics()
     this.trajectoryGraphics = this.add.graphics()
@@ -130,7 +147,7 @@ export class GameScene extends Phaser.Scene {
     this.hintText = this.add.text(
       this.scale.width / 2,
       this.scale.height - 60,
-      'Hold SPACE to swing, release to throw\nPress R to reset',
+      'Hold SPACE to swing, release to throw',
       { fontFamily: 'monospace', fontSize: '14px', color: '#2d2d2d', align: 'center' }
     )
     this.hintText.setOrigin(0.5)
@@ -167,21 +184,20 @@ export class GameScene extends Phaser.Scene {
     this.newBestText.setOrigin(0.5)
     this.newBestText.setScrollFactor(0)
     this.newBestText.setAlpha(0)
+
+    // Power meter (left side)
+    this.powerMeterBg = this.add.graphics()
+    this.powerMeterBg.setScrollFactor(0)
+    this.powerMeterFill = this.add.graphics()
+    this.powerMeterFill.setScrollFactor(0)
   }
 
   private setupInput(): void {
     this.spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
-    this.rKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.R)
   }
 
   update(_time: number, delta: number): void {
     const dt = delta / 1000 // convert to seconds
-
-    // R key resets from any state except idle
-    if (this.rKey.isDown && this.gameState !== 'idle') {
-      this.resetGame()
-      return
-    }
 
     switch (this.gameState) {
       case 'idle':
@@ -194,9 +210,19 @@ export class GameScene extends Phaser.Scene {
         break
       case 'flying':
         this.updateFlying(dt)
+        // SPACE restarts the game
+        if (this.spaceKey.isDown) {
+          this.resetGame()
+          this.startSwinging()
+        }
         break
       case 'resting':
         this.drawPreviousTrajectory()
+        // SPACE restarts the game
+        if (this.spaceKey.isDown) {
+          this.resetGame()
+          this.startSwinging()
+        }
         break
     }
   }
@@ -227,12 +253,76 @@ export class GameScene extends Phaser.Scene {
     // At angle 0: stone hangs below, then goes forward (right), up, back (left), down
     this.stonePosition.x = this.handPosition.x + Math.sin(this.slingAngle) * SLING_RADIUS
     this.stonePosition.y = this.handPosition.y + Math.cos(this.slingAngle) * SLING_RADIUS
+
+    this.drawReleaseZone()
+    this.drawPowerMeter()
     this.drawSlingAndStone()
 
     // Release on space up
     if (!this.spaceKey.isDown) {
       this.launchStone()
     }
+  }
+
+  private drawReleaseZone(): void {
+    this.releaseZoneGraphics.clear()
+
+    // Draw the sweet spot arc
+    this.releaseZoneGraphics.lineStyle(4, COLORS.sweetSpot, 0.5)
+
+    // Convert our rotation angles to Phaser's arc angles
+    // Our angle: 0 = down, increases clockwise
+    // Phaser arc: 0 = right, increases counter-clockwise
+    // So we need to transform: phaserAngle = PI/2 - ourAngle
+    const startAngle = Math.PI / 2 - SWEET_SPOT_END
+    const endAngle = Math.PI / 2 - SWEET_SPOT_START
+
+    this.releaseZoneGraphics.beginPath()
+    this.releaseZoneGraphics.arc(
+      this.handPosition.x,
+      this.handPosition.y,
+      SLING_RADIUS + 10,
+      startAngle,
+      endAngle,
+      false
+    )
+    this.releaseZoneGraphics.strokePath()
+
+    // Check if currently in sweet spot and highlight
+    const normalizedAngle = this.slingAngle % (Math.PI * 2)
+    if (normalizedAngle >= SWEET_SPOT_START && normalizedAngle <= SWEET_SPOT_END) {
+      // Stone is in sweet spot - make it glow
+      this.stoneGraphics.lineStyle(3, COLORS.sweetSpot, 0.8)
+      this.stoneGraphics.strokeCircle(this.stonePosition.x, this.stonePosition.y, STONE_RADIUS + 4)
+    }
+  }
+
+  private drawPowerMeter(): void {
+    const meterX = 20
+    const meterY = 100
+    const meterWidth = 15
+    const meterHeight = 150
+
+    // Calculate power (0 to 1)
+    const power = Math.min(
+      (this.angularSpeed / BASE_ANGULAR_SPEED - 1) / (MAX_SPEED_MULTIPLIER - 1),
+      1
+    )
+
+    // Background
+    this.powerMeterBg.clear()
+    this.powerMeterBg.fillStyle(COLORS.powerBarBg, 0.5)
+    this.powerMeterBg.fillRect(meterX, meterY, meterWidth, meterHeight)
+
+    // Fill (from bottom up)
+    this.powerMeterFill.clear()
+    this.powerMeterFill.fillStyle(COLORS.powerBar, 0.8)
+    const fillHeight = meterHeight * power
+    this.powerMeterFill.fillRect(meterX, meterY + meterHeight - fillHeight, meterWidth, fillHeight)
+
+    // Border
+    this.powerMeterBg.lineStyle(2, COLORS.shepherd, 0.8)
+    this.powerMeterBg.strokeRect(meterX, meterY, meterWidth, meterHeight)
   }
 
   private launchStone(): void {
@@ -252,15 +342,35 @@ export class GameScene extends Phaser.Scene {
     this.previousTrajectory = []
     this.trajectoryGraphics.clear()
 
+    // Clear swing UI
+    this.releaseZoneGraphics.clear()
+    this.powerMeterBg.clear()
+    this.powerMeterFill.clear()
+
     // Hide sling cord
     this.slingGraphics.clear()
     this.gameState = 'flying'
+
+    // Start slow motion
+    this.startSlowMotion()
 
     // Fade hint on first throw
     if (!this.hasThrown) {
       this.hasThrown = true
       this.tweens.add({ targets: this.hintText, alpha: 0, duration: 1000, ease: 'Power2' })
     }
+  }
+
+  private startSlowMotion(): void {
+    if (this.isSlowMo) return  // Already in slow-mo
+    this.isSlowMo = true
+    this.time.timeScale = SLOW_MO_SCALE
+
+    // Return to normal speed after duration
+    this.time.delayedCall(SLOW_MO_DURATION * SLOW_MO_SCALE, () => {
+      this.time.timeScale = 1
+      this.isSlowMo = false
+    })
   }
 
   private updateFlying(dt: number): void {
@@ -363,10 +473,17 @@ export class GameScene extends Phaser.Scene {
     // Reset camera
     this.cameras.main.scrollX = 0
 
+    // Reset time scale
+    this.time.timeScale = 1
+    this.isSlowMo = false
+
     // Hide UI elements
     this.distanceText.setAlpha(0)
     this.newBestText.setAlpha(0)
     this.trajectoryGraphics.clear()
+    this.releaseZoneGraphics.clear()
+    this.powerMeterBg.clear()
+    this.powerMeterFill.clear()
 
     // Redraw
     this.drawSlingAndStone()
