@@ -75,24 +75,28 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupWorld(): void {
-    this.cameras.main.setBounds(-100, 0, 20000, this.scale.height)
+    // Allow camera to follow stone in both directions
+    this.cameras.main.setBounds(-10000, 0, 30000, this.scale.height)
 
-    // Draw ground
+    // Draw ground (extends both directions)
     this.groundGraphics = this.add.graphics()
     this.groundGraphics.fillStyle(COLORS.ground, 1)
-    this.groundGraphics.fillRect(-100, this.groundY, 20100, 40)
+    this.groundGraphics.fillRect(-10000, this.groundY, 30000, 40)
   }
 
   private setupShepherd(): void {
     this.shepherdGraphics = this.add.graphics()
-    this.handPosition = new Phaser.Math.Vector2(SHEPHERD_X, this.groundY - 50)
+    // Hand stretched out to the right at shoulder height
+    const shoulderY = this.groundY - 45
+    this.handPosition = new Phaser.Math.Vector2(SHEPHERD_X + 20, shoulderY)
     this.drawShepherd()
   }
 
   private setupStone(): void {
+    // Stone dangles below the hand when idle
     this.stonePosition = new Phaser.Math.Vector2(
-      this.handPosition.x + SLING_RADIUS,
-      this.handPosition.y
+      this.handPosition.x,
+      this.handPosition.y + SLING_RADIUS
     )
     this.slingGraphics = this.add.graphics()
     this.stoneGraphics = this.add.graphics()
@@ -160,7 +164,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateSwinging(dt: number): void {
-    // Rotate stone around hand
+    // Rotate stone around hand (clockwise)
     this.slingAngle += this.angularSpeed * dt
 
     // Count rotations and increase speed
@@ -173,9 +177,10 @@ export class GameScene extends Phaser.Scene {
       )
     }
 
-    // Update stone position on the circle
-    this.stonePosition.x = this.handPosition.x + Math.cos(this.slingAngle) * SLING_RADIUS
-    this.stonePosition.y = this.handPosition.y - Math.sin(this.slingAngle) * SLING_RADIUS
+    // Update stone position on the circle (clockwise rotation)
+    // At angle 0: stone hangs below, then goes forward (right), up, back (left), down
+    this.stonePosition.x = this.handPosition.x + Math.sin(this.slingAngle) * SLING_RADIUS
+    this.stonePosition.y = this.handPosition.y + Math.cos(this.slingAngle) * SLING_RADIUS
     this.drawSlingAndStone()
 
     // Release on space up
@@ -185,10 +190,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private launchStone(): void {
-    // Calculate tangent direction (perpendicular to radius, in direction of rotation)
-    // For counter-clockwise rotation: tangent = (-sin, -cos) in screen coords
-    const tangentX = -Math.sin(this.slingAngle)
-    const tangentY = -Math.cos(this.slingAngle)
+    // Calculate tangent direction (perpendicular to radius, in direction of clockwise rotation)
+    // For clockwise rotation: tangent = (cos, -sin) in screen coords
+    const tangentX = Math.cos(this.slingAngle)
+    const tangentY = -Math.sin(this.slingAngle)
 
     // Launch speed scales with angular speed
     const speedMultiplier = this.angularSpeed / BASE_ANGULAR_SPEED
@@ -236,28 +241,30 @@ export class GameScene extends Phaser.Scene {
         this.velocityX = 0
         this.velocityY = 0
         this.gameState = 'resting'
-        this.showDistance()
       }
     }
 
-    // Update camera to follow stone
-    this.cameras.main.scrollX = Math.max(0, this.stonePosition.x - 200)
+    // Update camera to follow stone (both directions)
+    this.cameras.main.scrollX = this.stonePosition.x - 200
+
+    // Update live distance display
+    this.updateDistance()
 
     // Redraw stone
     this.drawStoneOnly()
   }
 
-  private showDistance(): void {
-    const distancePixels = this.stonePosition.x - SHEPHERD_X
+  private updateDistance(): void {
+    const distancePixels = Math.abs(this.stonePosition.x - SHEPHERD_X)
     const distanceMeters = distancePixels / PIXELS_PER_METER
     this.distanceText.setText(`${distanceMeters.toFixed(1)}m`)
     this.distanceText.setAlpha(1)
   }
 
   private resetGame(): void {
-    // Reset stone position
-    this.stonePosition.x = this.handPosition.x + SLING_RADIUS
-    this.stonePosition.y = this.handPosition.y
+    // Reset stone position (dangling below hand)
+    this.stonePosition.x = this.handPosition.x
+    this.stonePosition.y = this.handPosition.y + SLING_RADIUS
 
     // Reset velocity
     this.velocityX = 0
@@ -284,24 +291,34 @@ export class GameScene extends Phaser.Scene {
 
     g.clear()
     g.lineStyle(3, COLORS.shepherd, 1)
+
+    // Head
     g.strokeCircle(x, headY, 6)
+
+    // Body
     g.beginPath()
     g.moveTo(x, shoulderY)
     g.lineTo(x, hipY)
     g.strokePath()
+
+    // Legs
     g.beginPath()
     g.moveTo(x, hipY)
     g.lineTo(x - 8, footY)
     g.moveTo(x, hipY)
     g.lineTo(x + 8, footY)
     g.strokePath()
+
+    // Left arm (down by side)
     g.beginPath()
     g.moveTo(x, shoulderY)
     g.lineTo(x - 10, shoulderY + 15)
     g.strokePath()
+
+    // Right arm (stretched out horizontally holding sling)
     g.beginPath()
     g.moveTo(x, shoulderY)
-    g.lineTo(x, shoulderY - 5)
+    g.lineTo(x + 20, shoulderY)
     g.strokePath()
   }
 
