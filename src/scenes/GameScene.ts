@@ -39,6 +39,7 @@ export class GameScene extends Phaser.Scene {
 
   // Input
   private spaceKey!: Phaser.Input.Keyboard.Key
+  private rKey!: Phaser.Input.Keyboard.Key
 
   constructor() {
     super({ key: 'GameScene' })
@@ -91,6 +92,7 @@ export class GameScene extends Phaser.Scene {
 
     // Input
     this.spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
+    this.rKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.R)
 
     // Camera bounds
     this.cameras.main.setBounds(-100, 0, 20000, this.scale.height)
@@ -115,7 +117,9 @@ export class GameScene extends Phaser.Scene {
         break
 
       case 'resting':
-        // Wait for R key (implemented in next task)
+        if (this.rKey.isDown) {
+          this.resetGame()
+        }
         break
     }
   }
@@ -206,6 +210,27 @@ export class GameScene extends Phaser.Scene {
       this.gameState = 'resting'
       console.log(`Stone landed at x: ${this.stonePosition.x.toFixed(0)}`)
     }
+  }
+
+  private resetGame(): void {
+    // Remove physics body
+    if (this.stoneBody) {
+      this.matter.world.remove(this.stoneBody)
+      this.stoneBody = null
+    }
+
+    // Reset stone position
+    this.stonePosition.x = this.handPosition.x + SLING_RADIUS
+    this.stonePosition.y = this.handPosition.y
+
+    // Reset camera
+    this.cameras.main.scrollX = 0
+
+    // Redraw
+    this.drawSlingAndStone()
+
+    // Reset state
+    this.gameState = 'idle'
   }
 
   private drawShepherd(x: number, groundY: number): void {
