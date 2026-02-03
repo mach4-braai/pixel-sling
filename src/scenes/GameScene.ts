@@ -12,10 +12,10 @@ const COLORS = {
 // Game constants
 const SHEPHERD_X = 150
 const GROUND_Y_OFFSET = 20
-const SLING_RADIUS = 50
-const BASE_ANGULAR_SPEED = 2
-const SPEED_INCREASE_PER_ROTATION = 0.2
-const LAUNCH_VELOCITY_MULTIPLIER = 150 // Convert angular to linear velocity
+const SLING_RADIUS = 45
+const BASE_ANGULAR_SPEED = 2.5
+const SPEED_INCREASE_PER_ROTATION = 0.25
+const LAUNCH_VELOCITY_MULTIPLIER = 180
 
 type GameState = 'idle' | 'swinging' | 'flying' | 'resting'
 
@@ -44,6 +44,7 @@ export class GameScene extends Phaser.Scene {
   // Hint text
   private hintText!: Phaser.GameObjects.Text
   private hasThrown: boolean = false
+  private restingTime: number = 0
 
   constructor() {
     super({ key: 'GameScene' })
@@ -136,7 +137,8 @@ export class GameScene extends Phaser.Scene {
         break
 
       case 'resting':
-        if (this.rKey.isDown) {
+        this.restingTime += delta
+        if (this.restingTime > 500 && this.rKey.isDown) {
           this.resetGame()
         }
         break
@@ -237,7 +239,7 @@ export class GameScene extends Phaser.Scene {
 
     if (speed < 0.1 && this.stonePosition.y >= this.groundY - 10) {
       this.gameState = 'resting'
-      console.log(`Stone landed at x: ${this.stonePosition.x.toFixed(0)}`)
+      this.restingTime = 0
     }
   }
 
