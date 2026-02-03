@@ -13,8 +13,9 @@ const COLORS = {
 const SHEPHERD_X = 150
 const GROUND_Y_OFFSET = 20
 const SLING_RADIUS = 50
-const BASE_ANGULAR_SPEED = 2 // radians per second
-const SPEED_INCREASE_PER_ROTATION = 0.2 // 20% increase
+const BASE_ANGULAR_SPEED = 2
+const SPEED_INCREASE_PER_ROTATION = 0.2
+const LAUNCH_VELOCITY_MULTIPLIER = 150 // Convert angular to linear velocity
 
 type GameState = 'idle' | 'swinging' | 'flying' | 'resting'
 
@@ -25,12 +26,16 @@ export class GameScene extends Phaser.Scene {
   private handPosition!: Phaser.Math.Vector2
   private stonePosition!: Phaser.Math.Vector2
 
+  // Physics stone (only exists during flight)
+  private stoneBody: MatterJS.BodyType | null = null
+
   // Sling state
   private gameState: GameState = 'idle'
   private slingAngle: number = 0
   private angularSpeed: number = BASE_ANGULAR_SPEED
   private rotationCount: number = 0
   private lastAngleForCount: number = 0
+  private groundY!: number
 
   // Input
   private spaceKey!: Phaser.Input.Keyboard.Key
@@ -40,7 +45,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   create(): void {
-    const groundY = this.scale.height - GROUND_Y_OFFSET
+    this.groundY = this.scale.height - GROUND_Y_OFFSET
 
     // Set background color
     this.cameras.main.setBackgroundColor(COLORS.sky)
@@ -49,7 +54,7 @@ export class GameScene extends Phaser.Scene {
     const groundWidth = 20000
     this.matter.add.rectangle(
       groundWidth / 2,
-      groundY + 10,
+      this.groundY + 10,
       groundWidth,
       20,
       {
@@ -63,69 +68,143 @@ export class GameScene extends Phaser.Scene {
     // Draw ground visually
     const groundGraphics = this.add.graphics()
     groundGraphics.fillStyle(COLORS.ground, 1)
-    groundGraphics.fillRect(-100, groundY, groundWidth + 100, 40)
+    groundGraphics.fillRect(-100, this.groundY, groundWidth + 100, 40)
 
     // Draw shepherd
     this.shepherdGraphics = this.add.graphics()
-    this.drawShepherd(SHEPHERD_X, groundY)
+    this.drawShepherd(SHEPHERD_X, this.groundY)
 
-    // Hand position (sling pivot point)
-    this.handPosition = new Phaser.Math.Vector2(SHEPHERD_X, groundY - 50)
+    // Hand position
+    this.handPosition = new Phaser.Math.Vector2(SHEPHERD_X, this.groundY - 50)
 
-    // Stone position (starts at rest beside shepherd)
+    // Stone position
     this.stonePosition = new Phaser.Math.Vector2(
       this.handPosition.x + SLING_RADIUS,
       this.handPosition.y
     )
 
-    // Graphics for sling and stone
+    // Graphics
     this.slingGraphics = this.add.graphics()
     this.stoneGraphics = this.add.graphics()
 
-    // Draw initial state
     this.drawSlingAndStone()
 
     // Input
     this.spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE)
+
+    // Camera bounds
+    this.cameras.main.setBounds(-100, 0, 20000, this.scale.height)
   }
 
   update(_time: number, delta: number): void {
-    const dt = delta / 1000 // convert to seconds
+    const dt = delta / 1000
 
-    if (this.gameState === 'idle') {
-      if (this.spaceKey.isDown) {
-        this.gameState = 'swinging'
-        this.slingAngle = 0
-        this.angularSpeed = BASE_ANGULAR_SPEED
-        this.rotationCount = 0
-        this.lastAngleForCount = 0
+    switch (this.gameState) {
+      case 'idle':
+        if (this.spaceKey.isDown) {
+          this.startSwinging()
+        }
+        break
+
+      case 'swinging':
+        this.updateSwinging(dt)
+        break
+
+      case 'flying':
+        this.updateFlying()
+        break
+
+      case 'resting':
+        // Wait for R key (implemented in next task)
+        break
+    }
+  }
+
+  private startSwinging(): void {
+    this.gameState = 'swinging'
+    this.slingAngle = 0
+    this.angularSpeed = BASE_ANGULAR_SPEED
+    this.rotationCount = 0
+    this.lastAngleForCount = 0
+  }
+
+  private updateSwinging(dt: number): void {
+    // Rotate stone
+    this.slingAngle += this.angularSpeed * dt
+
+    // Count rotations and increase speed
+    if (this.slingAngle - this.lastAngleForCount >= Math.PI * 2) {
+      this.rotationCount++
+      this.lastAngleForCount = this.slingAngle
+      this.angularSpeed = Math.min(
+        BASE_ANGULAR_SPEED * (1 + SPEED_INCREASE_PER_ROTATION * this.rotationCount),
+        BASE_ANGULAR_SPEED * 5
+      )
+    }
+
+    // Update stone position
+    this.stonePosition.x = this.handPosition.x + Math.cos(this.slingAngle) * SLING_RADIUS
+    this.stonePosition.y = this.handPosition.y - Math.sin(this.slingAngle) * SLING_RADIUS
+
+    this.drawSlingAndStone()
+
+    // Release on space up
+    if (!this.spaceKey.isDown) {
+      this.launchStone()
+    }
+  }
+
+  private launchStone(): void {
+    // Calculate tangent velocity (perpendicular to radius)
+    // Tangent direction: (-sin(angle), -cos(angle)) for counter-clockwise
+    const tangentX = -Math.sin(this.slingAngle)
+    const tangentY = -Math.cos(this.slingAngle)
+
+    const speed = this.angularSpeed * SLING_RADIUS * (LAUNCH_VELOCITY_MULTIPLIER / SLING_RADIUS)
+
+    // Create physics body for stone
+    this.stoneBody = this.matter.add.circle(
+      this.stonePosition.x,
+      this.stonePosition.y,
+      8,
+      {
+        restitution: 0.4,
+        friction: 0.3,
+        frictionAir: 0.001,
+        label: 'stone',
       }
-    } else if (this.gameState === 'swinging') {
-      // Rotate stone
-      this.slingAngle += this.angularSpeed * dt
+    )
 
-      // Count rotations and increase speed
-      if (this.slingAngle - this.lastAngleForCount >= Math.PI * 2) {
-        this.rotationCount++
-        this.lastAngleForCount = this.slingAngle
-        // Increase speed, cap at 5x base speed
-        this.angularSpeed = Math.min(
-          BASE_ANGULAR_SPEED * (1 + SPEED_INCREASE_PER_ROTATION * this.rotationCount),
-          BASE_ANGULAR_SPEED * 5
-        )
-      }
+    // Apply launch velocity
+    this.matter.body.setVelocity(this.stoneBody, {
+      x: tangentX * speed,
+      y: tangentY * speed,
+    })
 
-      // Update stone position
-      this.stonePosition.x = this.handPosition.x + Math.cos(this.slingAngle) * SLING_RADIUS
-      this.stonePosition.y = this.handPosition.y - Math.sin(this.slingAngle) * SLING_RADIUS
+    // Hide sling cord
+    this.slingGraphics.clear()
 
-      this.drawSlingAndStone()
+    this.gameState = 'flying'
+  }
 
-      // Release on space up
-      if (!this.spaceKey.isDown) {
-        this.gameState = 'idle' // Will change to 'flying' in next task
-        console.log(`Released after ${this.rotationCount} rotations at speed ${this.angularSpeed.toFixed(2)}`)
-      }
+  private updateFlying(): void {
+    if (!this.stoneBody) return
+
+    // Update stone graphics to follow physics body
+    this.stonePosition.x = this.stoneBody.position.x
+    this.stonePosition.y = this.stoneBody.position.y
+    this.drawStoneOnly()
+
+    // Camera follows stone
+    this.cameras.main.scrollX = this.stonePosition.x - 200
+
+    // Check if stone has come to rest
+    const velocity = this.stoneBody.velocity
+    const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y)
+
+    if (speed < 0.1 && this.stonePosition.y >= this.groundY - 10) {
+      this.gameState = 'resting'
+      console.log(`Stone landed at x: ${this.stonePosition.x.toFixed(0)}`)
     }
   }
 
@@ -165,7 +244,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawSlingAndStone(): void {
-    // Draw sling cord
     this.slingGraphics.clear()
     this.slingGraphics.lineStyle(2, COLORS.sling, 1)
     this.slingGraphics.beginPath()
@@ -173,7 +251,10 @@ export class GameScene extends Phaser.Scene {
     this.slingGraphics.lineTo(this.stonePosition.x, this.stonePosition.y)
     this.slingGraphics.strokePath()
 
-    // Draw stone
+    this.drawStoneOnly()
+  }
+
+  private drawStoneOnly(): void {
     this.stoneGraphics.clear()
     this.stoneGraphics.fillStyle(COLORS.stone, 1)
     this.stoneGraphics.fillCircle(this.stonePosition.x, this.stonePosition.y, 8)
