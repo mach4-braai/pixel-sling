@@ -1,13 +1,16 @@
 import Phaser from 'phaser'
 
-// Color palette (5 colors - minimalist)
+// Color palette
 const COLORS = {
   sky: 0x8899aa,
   ground: 0x4a4a4a,
   shepherd: 0x2d2d2d,
   stone: 0x666666,
   sling: 0x3d3d3d,
+  trajectory: 0x666666,
 }
+
+const STORAGE_KEY = 'pixel-sling-highscore'
 
 // Game constants
 const SHEPHERD_X = 150
@@ -36,8 +39,17 @@ export class GameScene extends Phaser.Scene {
   private slingGraphics!: Phaser.GameObjects.Graphics
   private stoneGraphics!: Phaser.GameObjects.Graphics
   private groundGraphics!: Phaser.GameObjects.Graphics
+  private trajectoryGraphics!: Phaser.GameObjects.Graphics
   private hintText!: Phaser.GameObjects.Text
   private distanceText!: Phaser.GameObjects.Text
+  private highScoreText!: Phaser.GameObjects.Text
+  private newBestText!: Phaser.GameObjects.Text
+
+  // High score
+  private highScore: number = 0
+
+  // Previous throw trajectory
+  private previousTrajectory: { x: number; y: number }[] = []
 
   // Positions
   private handPosition!: Phaser.Math.Vector2
@@ -67,11 +79,21 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     this.groundY = this.scale.height - GROUND_Y_OFFSET
 
+    this.loadHighScore()
     this.setupWorld()
     this.setupShepherd()
     this.setupStone()
     this.setupUI()
     this.setupInput()
+  }
+
+  private loadHighScore(): void {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    this.highScore = saved ? parseFloat(saved) : 0
+  }
+
+  private saveHighScore(): void {
+    localStorage.setItem(STORAGE_KEY, this.highScore.toString())
   }
 
   private setupWorld(): void {
@@ -100,6 +122,7 @@ export class GameScene extends Phaser.Scene {
     )
     this.slingGraphics = this.add.graphics()
     this.stoneGraphics = this.add.graphics()
+    this.trajectoryGraphics = this.add.graphics()
     this.drawSlingAndStone()
   }
 
@@ -113,7 +136,7 @@ export class GameScene extends Phaser.Scene {
     this.hintText.setOrigin(0.5)
     this.hintText.setScrollFactor(0)
 
-    // Distance display (hidden until stone comes to rest)
+    // Distance display
     this.distanceText = this.add.text(
       this.scale.width / 2,
       50,
@@ -123,6 +146,27 @@ export class GameScene extends Phaser.Scene {
     this.distanceText.setOrigin(0.5)
     this.distanceText.setScrollFactor(0)
     this.distanceText.setAlpha(0)
+
+    // High score display
+    this.highScoreText = this.add.text(
+      this.scale.width - 10,
+      10,
+      this.highScore > 0 ? `Best: ${this.highScore.toFixed(1)}m` : '',
+      { fontFamily: 'monospace', fontSize: '16px', color: '#2d2d2d', align: 'right' }
+    )
+    this.highScoreText.setOrigin(1, 0)
+    this.highScoreText.setScrollFactor(0)
+
+    // New best celebration text (hidden)
+    this.newBestText = this.add.text(
+      this.scale.width / 2,
+      90,
+      'NEW BEST!',
+      { fontFamily: 'monospace', fontSize: '18px', color: '#4a7c4e', align: 'center' }
+    )
+    this.newBestText.setOrigin(0.5)
+    this.newBestText.setScrollFactor(0)
+    this.newBestText.setAlpha(0)
   }
 
   private setupInput(): void {
@@ -141,16 +185,18 @@ export class GameScene extends Phaser.Scene {
 
     switch (this.gameState) {
       case 'idle':
+        this.drawPreviousTrajectory()
         if (this.spaceKey.isDown) this.startSwinging()
         break
       case 'swinging':
+        this.drawPreviousTrajectory()
         this.updateSwinging(dt)
         break
       case 'flying':
         this.updateFlying(dt)
         break
       case 'resting':
-        // Just wait for R key (handled above)
+        this.drawPreviousTrajectory()
         break
     }
   }
@@ -202,6 +248,10 @@ export class GameScene extends Phaser.Scene {
     this.velocityX = tangentX * launchSpeed
     this.velocityY = tangentY * launchSpeed
 
+    // Clear previous trajectory and start recording new one
+    this.previousTrajectory = []
+    this.trajectoryGraphics.clear()
+
     // Hide sling cord
     this.slingGraphics.clear()
     this.gameState = 'flying'
@@ -241,7 +291,14 @@ export class GameScene extends Phaser.Scene {
         this.velocityX = 0
         this.velocityY = 0
         this.gameState = 'resting'
+        this.checkHighScore()
       }
+    }
+
+    // Record trajectory point (every few frames to avoid too many points)
+    if (this.previousTrajectory.length === 0 ||
+        Math.abs(this.stonePosition.x - this.previousTrajectory[this.previousTrajectory.length - 1].x) > 15) {
+      this.previousTrajectory.push({ x: this.stonePosition.x, y: this.stonePosition.y })
     }
 
     // Update camera to follow stone (both directions)
@@ -254,11 +311,44 @@ export class GameScene extends Phaser.Scene {
     this.drawStoneOnly()
   }
 
+  private drawPreviousTrajectory(): void {
+    this.trajectoryGraphics.clear()
+
+    if (this.previousTrajectory.length < 2) return
+
+    this.trajectoryGraphics.fillStyle(COLORS.trajectory, 0.7)
+
+    for (const point of this.previousTrajectory) {
+      this.trajectoryGraphics.fillCircle(point.x, point.y, 3)
+    }
+  }
+
   private updateDistance(): void {
     const distancePixels = Math.abs(this.stonePosition.x - SHEPHERD_X)
     const distanceMeters = distancePixels / PIXELS_PER_METER
     this.distanceText.setText(`${distanceMeters.toFixed(1)}m`)
     this.distanceText.setAlpha(1)
+  }
+
+  private checkHighScore(): void {
+    const distancePixels = Math.abs(this.stonePosition.x - SHEPHERD_X)
+    const distanceMeters = distancePixels / PIXELS_PER_METER
+
+    if (distanceMeters > this.highScore) {
+      this.highScore = distanceMeters
+      this.saveHighScore()
+      this.highScoreText.setText(`Best: ${this.highScore.toFixed(1)}m`)
+
+      // Show celebration
+      this.newBestText.setAlpha(1)
+      this.tweens.add({
+        targets: this.newBestText,
+        alpha: 0,
+        duration: 2000,
+        delay: 1000,
+        ease: 'Power2'
+      })
+    }
   }
 
   private resetGame(): void {
@@ -273,8 +363,10 @@ export class GameScene extends Phaser.Scene {
     // Reset camera
     this.cameras.main.scrollX = 0
 
-    // Hide distance
+    // Hide UI elements
     this.distanceText.setAlpha(0)
+    this.newBestText.setAlpha(0)
+    this.trajectoryGraphics.clear()
 
     // Redraw
     this.drawSlingAndStone()
