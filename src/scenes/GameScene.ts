@@ -11,6 +11,7 @@ const COLORS = {
   sweetSpot: 0x4a7c4e,
   powerBar: 0x4a7c4e,
   powerBarBg: 0x3d3d3d,
+  target: 0x8b4513,  // Brown enemy
 }
 
 // Release zone (optimal release angles for forward throw)
@@ -24,10 +25,13 @@ const SLOW_MO_SCALE = 0.3     // time scale during slow-mo
 const STORAGE_KEY = 'pixel-sling-highscore'
 
 // Game constants
-const SHEPHERD_X = 150
+const SHEPHERD_X = 400  // Center of screen
 const GROUND_Y_OFFSET = 20
 const SLING_RADIUS = 45
 const STONE_RADIUS = 8
+const TARGET_RADIUS = 12
+const TARGET_SPEED = 40  // Pixels per second
+const TARGET_SPAWN_X = 850  // Just off right edge
 
 // Sling mechanics
 const BASE_ANGULAR_SPEED = 8 // radians per second
@@ -40,7 +44,6 @@ const LAUNCH_SPEED = 300 // base launch speed in pixels/second
 const BOUNCE_DAMPING = 0.4 // velocity retained after bounce
 const FRICTION = 0.98 // horizontal velocity multiplier per frame when rolling
 const REST_THRESHOLD = 10 // velocity below this = at rest
-const PIXELS_PER_METER = 50 // scale for distance display
 
 type GameState = 'idle' | 'swinging' | 'flying' | 'resting'
 
@@ -50,23 +53,24 @@ export class GameScene extends Phaser.Scene {
   private slingGraphics!: Phaser.GameObjects.Graphics
   private stoneGraphics!: Phaser.GameObjects.Graphics
   private groundGraphics!: Phaser.GameObjects.Graphics
-  private trajectoryGraphics!: Phaser.GameObjects.Graphics
   private releaseZoneGraphics!: Phaser.GameObjects.Graphics
   private powerMeterBg!: Phaser.GameObjects.Graphics
   private powerMeterFill!: Phaser.GameObjects.Graphics
+  private targetGraphics!: Phaser.GameObjects.Graphics
   private hintText!: Phaser.GameObjects.Text
-  private distanceText!: Phaser.GameObjects.Text
+  private scoreText!: Phaser.GameObjects.Text
   private highScoreText!: Phaser.GameObjects.Text
   private newBestText!: Phaser.GameObjects.Text
 
-  // High score
+  // Score
+  private score: number = 0
   private highScore: number = 0
+
+  // Target
+  private targetPosition!: Phaser.Math.Vector2
 
   // Slow motion
   private isSlowMo: boolean = false
-
-  // Previous throw trajectory
-  private previousTrajectory: { x: number; y: number }[] = []
 
   // Positions
   private handPosition!: Phaser.Math.Vector2
@@ -99,6 +103,7 @@ export class GameScene extends Phaser.Scene {
     this.setupWorld()
     this.setupShepherd()
     this.setupStone()
+    this.setupTarget()
     this.setupUI()
     this.setupInput()
   }
@@ -113,13 +118,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupWorld(): void {
-    // Allow camera to follow stone in both directions
-    this.cameras.main.setBounds(-10000, 0, 30000, this.scale.height)
-
-    // Draw ground (extends both directions)
+    // Draw ground
     this.groundGraphics = this.add.graphics()
     this.groundGraphics.fillStyle(COLORS.ground, 1)
-    this.groundGraphics.fillRect(-10000, this.groundY, 30000, 40)
+    this.groundGraphics.fillRect(0, this.groundY, this.scale.width, 40)
   }
 
   private setupShepherd(): void {
@@ -139,8 +141,13 @@ export class GameScene extends Phaser.Scene {
     this.releaseZoneGraphics = this.add.graphics()
     this.slingGraphics = this.add.graphics()
     this.stoneGraphics = this.add.graphics()
-    this.trajectoryGraphics = this.add.graphics()
     this.drawSlingAndStone()
+  }
+
+  private setupTarget(): void {
+    this.targetGraphics = this.add.graphics()
+    this.targetPosition = new Phaser.Math.Vector2(TARGET_SPAWN_X, this.groundY - TARGET_RADIUS)
+    this.drawTarget()
   }
 
   private setupUI(): void {
@@ -151,28 +158,24 @@ export class GameScene extends Phaser.Scene {
       { fontFamily: 'monospace', fontSize: '14px', color: '#2d2d2d', align: 'center' }
     )
     this.hintText.setOrigin(0.5)
-    this.hintText.setScrollFactor(0)
 
-    // Distance display
-    this.distanceText = this.add.text(
+    // Score display
+    this.scoreText = this.add.text(
       this.scale.width / 2,
       50,
-      '',
+      'Score: 0',
       { fontFamily: 'monospace', fontSize: '24px', color: '#2d2d2d', align: 'center' }
     )
-    this.distanceText.setOrigin(0.5)
-    this.distanceText.setScrollFactor(0)
-    this.distanceText.setAlpha(0)
+    this.scoreText.setOrigin(0.5)
 
     // High score display
     this.highScoreText = this.add.text(
       this.scale.width - 10,
       10,
-      this.highScore > 0 ? `Best: ${this.highScore.toFixed(1)}m` : '',
+      this.highScore > 0 ? `Best: ${this.highScore}` : '',
       { fontFamily: 'monospace', fontSize: '16px', color: '#2d2d2d', align: 'right' }
     )
     this.highScoreText.setOrigin(1, 0)
-    this.highScoreText.setScrollFactor(0)
 
     // New best celebration text (hidden)
     this.newBestText = this.add.text(
@@ -182,14 +185,11 @@ export class GameScene extends Phaser.Scene {
       { fontFamily: 'monospace', fontSize: '18px', color: '#4a7c4e', align: 'center' }
     )
     this.newBestText.setOrigin(0.5)
-    this.newBestText.setScrollFactor(0)
     this.newBestText.setAlpha(0)
 
     // Power meter (left side)
     this.powerMeterBg = this.add.graphics()
-    this.powerMeterBg.setScrollFactor(0)
     this.powerMeterFill = this.add.graphics()
-    this.powerMeterFill.setScrollFactor(0)
   }
 
   private setupInput(): void {
@@ -199,28 +199,28 @@ export class GameScene extends Phaser.Scene {
   update(_time: number, delta: number): void {
     const dt = delta / 1000 // convert to seconds
 
+    // Always update target movement
+    this.updateTarget(dt)
+
     switch (this.gameState) {
       case 'idle':
-        this.drawPreviousTrajectory()
         if (this.spaceKey.isDown) this.startSwinging()
         break
       case 'swinging':
-        this.drawPreviousTrajectory()
         this.updateSwinging(dt)
         break
       case 'flying':
         this.updateFlying(dt)
-        // SPACE restarts the game
+        // SPACE restarts the stone
         if (this.spaceKey.isDown) {
-          this.resetGame()
+          this.resetStone()
           this.startSwinging()
         }
         break
       case 'resting':
-        this.drawPreviousTrajectory()
-        // SPACE restarts the game
+        // SPACE restarts the stone
         if (this.spaceKey.isDown) {
-          this.resetGame()
+          this.resetStone()
           this.startSwinging()
         }
         break
@@ -338,10 +338,6 @@ export class GameScene extends Phaser.Scene {
     this.velocityX = tangentX * launchSpeed
     this.velocityY = tangentY * launchSpeed
 
-    // Clear previous trajectory and start recording new one
-    this.previousTrajectory = []
-    this.trajectoryGraphics.clear()
-
     // Clear swing UI
     this.releaseZoneGraphics.clear()
     this.powerMeterBg.clear()
@@ -381,6 +377,9 @@ export class GameScene extends Phaser.Scene {
     this.stonePosition.x += this.velocityX * dt
     this.stonePosition.y += this.velocityY * dt
 
+    // Check target collision
+    this.checkTargetCollision()
+
     // Ground collision
     const groundContact = this.groundY - STONE_RADIUS
     if (this.stonePosition.y >= groundContact) {
@@ -396,72 +395,77 @@ export class GameScene extends Phaser.Scene {
         this.velocityX *= FRICTION
       }
 
-      // Check if at rest
-      if (Math.abs(this.velocityX) < REST_THRESHOLD && Math.abs(this.velocityY) < REST_THRESHOLD) {
+      // Check if at rest or off screen
+      const offScreen = this.stonePosition.x < -50 || this.stonePosition.x > this.scale.width + 50
+      if (offScreen || (Math.abs(this.velocityX) < REST_THRESHOLD && Math.abs(this.velocityY) < REST_THRESHOLD)) {
         this.velocityX = 0
         this.velocityY = 0
         this.gameState = 'resting'
-        this.checkHighScore()
       }
     }
-
-    // Record trajectory point (every few frames to avoid too many points)
-    if (this.previousTrajectory.length === 0 ||
-        Math.abs(this.stonePosition.x - this.previousTrajectory[this.previousTrajectory.length - 1].x) > 15) {
-      this.previousTrajectory.push({ x: this.stonePosition.x, y: this.stonePosition.y })
-    }
-
-    // Update camera to follow stone (both directions)
-    this.cameras.main.scrollX = this.stonePosition.x - 200
-
-    // Update live distance display
-    this.updateDistance()
 
     // Redraw stone
     this.drawStoneOnly()
   }
 
-  private drawPreviousTrajectory(): void {
-    this.trajectoryGraphics.clear()
+  private updateTarget(dt: number): void {
+    // Move target toward shepherd
+    this.targetPosition.x -= TARGET_SPEED * dt
 
-    if (this.previousTrajectory.length < 2) return
+    // If target reaches shepherd, game over (reset score)
+    if (this.targetPosition.x <= SHEPHERD_X + 30) {
+      this.score = 0
+      this.scoreText.setText('Score: 0')
+      this.spawnTarget()
+    }
 
-    this.trajectoryGraphics.fillStyle(COLORS.trajectory, 0.7)
+    this.drawTarget()
+  }
 
-    for (const point of this.previousTrajectory) {
-      this.trajectoryGraphics.fillCircle(point.x, point.y, 3)
+  private checkTargetCollision(): void {
+    const dx = this.stonePosition.x - this.targetPosition.x
+    const dy = this.stonePosition.y - this.targetPosition.y
+    const distance = Math.sqrt(dx * dx + dy * dy)
+    const hitRadius = STONE_RADIUS + TARGET_RADIUS
+
+    if (distance < hitRadius) {
+      // Hit! Increment score and spawn new target
+      this.score++
+      this.scoreText.setText(`Score: ${this.score}`)
+
+      // Check high score
+      if (this.score > this.highScore) {
+        this.highScore = this.score
+        this.saveHighScore()
+        this.highScoreText.setText(`Best: ${this.highScore}`)
+
+        // Show celebration
+        this.newBestText.setAlpha(1)
+        this.tweens.add({
+          targets: this.newBestText,
+          alpha: 0,
+          duration: 2000,
+          delay: 500,
+          ease: 'Power2'
+        })
+      }
+
+      this.spawnTarget()
     }
   }
 
-  private updateDistance(): void {
-    const distancePixels = Math.abs(this.stonePosition.x - SHEPHERD_X)
-    const distanceMeters = distancePixels / PIXELS_PER_METER
-    this.distanceText.setText(`${distanceMeters.toFixed(1)}m`)
-    this.distanceText.setAlpha(1)
+  private spawnTarget(): void {
+    this.targetPosition.x = TARGET_SPAWN_X
+    this.targetPosition.y = this.groundY - TARGET_RADIUS
   }
 
-  private checkHighScore(): void {
-    const distancePixels = Math.abs(this.stonePosition.x - SHEPHERD_X)
-    const distanceMeters = distancePixels / PIXELS_PER_METER
-
-    if (distanceMeters > this.highScore) {
-      this.highScore = distanceMeters
-      this.saveHighScore()
-      this.highScoreText.setText(`Best: ${this.highScore.toFixed(1)}m`)
-
-      // Show celebration
-      this.newBestText.setAlpha(1)
-      this.tweens.add({
-        targets: this.newBestText,
-        alpha: 0,
-        duration: 2000,
-        delay: 1000,
-        ease: 'Power2'
-      })
-    }
+  private drawTarget(): void {
+    this.targetGraphics.clear()
+    this.targetGraphics.fillStyle(COLORS.target, 1)
+    this.targetGraphics.fillCircle(this.targetPosition.x, this.targetPosition.y, TARGET_RADIUS)
   }
 
-  private resetGame(): void {
+  private resetStone(): void {
     // Reset stone position (dangling below hand)
     this.stonePosition.x = this.handPosition.x
     this.stonePosition.y = this.handPosition.y + SLING_RADIUS
@@ -470,17 +474,11 @@ export class GameScene extends Phaser.Scene {
     this.velocityX = 0
     this.velocityY = 0
 
-    // Reset camera
-    this.cameras.main.scrollX = 0
-
     // Reset time scale
     this.time.timeScale = 1
     this.isSlowMo = false
 
-    // Hide UI elements
-    this.distanceText.setAlpha(0)
-    this.newBestText.setAlpha(0)
-    this.trajectoryGraphics.clear()
+    // Clear UI elements
     this.releaseZoneGraphics.clear()
     this.powerMeterBg.clear()
     this.powerMeterFill.clear()
